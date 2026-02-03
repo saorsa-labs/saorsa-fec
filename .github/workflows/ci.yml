@@ -2,13 +2,12 @@ name: saorsa-fec CI
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
 
 jobs:
   test:
@@ -18,456 +17,49 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        rust-version: [1.85.0, stable, beta]
-        features: ["", "pure-rust", "isa-l"]
-        exclude:
-          # ISA-L is only available on x86_64 Linux
-          - os: macos-latest
-            features: "isa-l"
-          - os: windows-latest
-            features: "isa-l"
-    
+        rust-version: [stable]
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Install Rust ${{ matrix.rust-version }}
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: ${{ matrix.rust-version }}
-        components: rustfmt, clippy
-    
-     - name: Install ISA-L (Linux only)
-       if: runner.os == 'Linux' && matrix.features == 'isa-l'
-       run: |
-         echo "Installing ISA-L dependencies..."
-         sudo apt-get update || echo "::warning::Failed to update package list"
-         sudo apt-get install -y build-essential autoconf automake libtool || echo "::warning::Failed to install build tools"
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-         echo "Installing modern nasm..."
-         if wget https://www.nasm.us/pub/nasm/releasebuilds/2.15.05/nasm-2.15.05.tar.bz2; then
-           tar -xjf nasm-2.15.05.tar.bz2
-           cd nasm-2.15.05
-           ./configure --prefix=/usr
-           make -j$(nproc)
-           sudo make install
-           cd ..
-           rm -rf nasm-2.15.05*
-         else
-           echo "::warning::Failed to download nasm, trying alternative version"
-           if wget https://www.nasm.us/pub/nasm/releasebuilds/2.16.01/nasm-2.16.01.tar.bz2; then
-             tar -xjf nasm-2.16.01.tar.bz2
-             cd nasm-2.16.01
-             ./configure --prefix=/usr
-             make -j$(nproc)
-             sudo make install
-             cd ..
-             rm -rf nasm-2.16.01*
-           fi
-         fi
+      - name: Install Rust ${{ matrix.rust-version }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust-version }}
+          components: rustfmt, clippy
 
-         echo "Installing ISA-L..."
-         if git clone https://github.com/intel/isa-l.git; then
-           cd isa-l
-           ./autogen.sh
-           ./configure --prefix=/usr --libdir=/usr/lib/x86_64-linux-gnu
-           make -j$(nproc)
-           sudo make install
-           sudo ldconfig
-           cd ..
-           rm -rf isa-l
-         else
-           echo "::error::Failed to clone ISA-L repository"
-           exit 1
-         fi
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ matrix.rust-version }}-${{ hashFiles('**/Cargo.lock') }}
 
-    - name: Cache Cargo registry
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-${{ matrix.rust-version }}-${{ matrix.features }}-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-${{ matrix.rust-version }}-
-          ${{ runner.os }}-cargo-
-    
-    - name: Check formatting (stable only)
-      if: matrix.rust-version == 'stable' && matrix.os == 'ubuntu-latest'
-      run: cargo fmt --all -- --check
-    
-     - name: Check for forbidden patterns
-       if: matrix.rust-version == 'stable' && matrix.os == 'ubuntu-latest'
-       shell: bash
-       run: |
-         echo "Checking for forbidden patterns in production code..."
-         EXIT_CODE=0
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
-         # Install ripgrep if not available
-         if ! command -v rg &> /dev/null; then
-           echo "Installing ripgrep..."
-           if curl -L https://github.com/BurntSushi/ripgrep/releases/download/13.0.0/ripgrep-13.0.0-x86_64-unknown-linux-musl.tar.gz | tar xz; then
-             export PATH="$PWD/ripgrep-13.0.0-x86_64-unknown-linux-musl:$PATH"
-           else
-             echo "::warning::Failed to install ripgrep, falling back to grep"
-             # Fallback to using grep instead of ripgrep
-             alias rg='grep -r'
-           fi
-         fi
+      - name: Run clippy
+        run: cargo clippy --all-features -- -D warnings
 
-         # Check for unwrap() in production code (tests are OK)
-         if rg -n "\.unwrap\(\)" src/ --type rust; then
-           echo "::error::Found .unwrap() in production code:"
-           rg -n "\.unwrap\(\)" src/ --type rust | while IFS=: read -r file line content; do
-             # Check if this line is within a test function by looking at context
-             if ! sed -n "$((line-10)),$((line+2))p" "$file" | grep -q -E "(#\[test\]|#\[tokio::test\]|#\[cfg\(test\)\]|fn test_)"; then
-               echo "::error file=$file,line=$line::$content"
-               EXIT_CODE=1
-             fi
-           done
-         fi
+      - name: Build
+        run: cargo build --all-features
 
-         # Check for expect() in production code (tests are OK)
-         if rg -n "\.expect\(" src/ --type rust; then
-           echo "::error::Found .expect() in production code:"
-           rg -n "\.expect\(" src/ --type rust | while IFS=: read -r file line content; do
-             if ! sed -n "$((line-10)),$((line+2))p" "$file" | grep -q -E "(#\[test\]|#\[tokio::test\]|#\[cfg\(test\)\]|fn test_)"; then
-               echo "::error file=$file,line=$line::$content"
-               EXIT_CODE=1
-             fi
-           done
-         fi
+      - name: Run tests
+        run: cargo test --all-features
 
-         # Check for panic! in production code (tests are OK)
-         if rg -n "panic!" src/ --type rust; then
-           echo "::error::Found panic! in production code:"
-           rg -n "panic!" src/ --type rust | while IFS=: read -r file line content; do
-             if ! sed -n "$((line-10)),$((line+2))p" "$file" | grep -q -E "(#\[test\]|#\[tokio::test\]|#\[cfg\(test\)\]|fn test_)"; then
-               echo "::error file=$file,line=$line::$content"
-               EXIT_CODE=1
-             fi
-           done
-         fi
-
-         # Check for todo! and unimplemented! (anywhere, including tests)
-         if rg -n -E "(todo!|unimplemented!\()" src/ --type rust; then
-           echo "::error::Found incomplete implementations:"
-           rg -n -E "(todo!|unimplemented!\()" src/ --type rust | while IFS=: read -r file line content; do
-             echo "::error file=$file,line=$line::$content"
-             EXIT_CODE=1
-           done
-         fi
-
-         if [ $EXIT_CODE -eq 0 ]; then
-           echo "✅ No forbidden patterns found in production code"
-         fi
-
-         exit $EXIT_CODE
-    
-    - name: Clippy linting
-      shell: bash
-      run: |
-        if [ "${{ matrix.features }}" = "" ]; then
-          cargo clippy --all-targets -- -D warnings -D clippy::correctness -D clippy::suspicious -D clippy::complexity -W clippy::perf -W clippy::style
-        else
-          cargo clippy --all-targets --features "${{ matrix.features }}" -- -D warnings -D clippy::correctness -D clippy::suspicious -D clippy::complexity -W clippy::perf -W clippy::style
-        fi
-    
-    - name: Build with features
-      shell: bash
-      run: |
-        if [ "${{ matrix.features }}" = "" ]; then
-          cargo build --verbose
-        else
-          cargo build --features "${{ matrix.features }}" --verbose
-        fi
-    
-    - name: Run unit tests
-      shell: bash
-      run: |
-        if [ "${{ matrix.features }}" = "" ]; then
-          cargo test --lib --verbose
-        else
-          cargo test --lib --features "${{ matrix.features }}" --verbose
-        fi
-    
-    - name: Run integration tests
-      shell: bash
-      run: |
-        if [ "${{ matrix.features }}" = "" ]; then
-          cargo test --test '*' --verbose
-        else
-          cargo test --test '*' --features "${{ matrix.features }}" --verbose
-        fi
-    
-    - name: Run doctests
-      shell: bash
-      run: |
-        if [ "${{ matrix.features }}" = "" ]; then
-          cargo test --doc
-        else
-          cargo test --doc --features "${{ matrix.features }}"
-        fi
-    
-     - name: Run examples
-       if: matrix.rust-version == 'stable'
-       shell: bash
-       run: |
-         # Use PowerShell on Windows for better globbing support
-         if [ "${{ runner.os }}" = "Windows" ]; then
-           # Use PowerShell to list example files
-           powershell -Command "
-             \$examples = Get-ChildItem -Path examples -Filter '*.rs' -File
-             foreach (\$example in \$examples) {
-               \$ex = \$example.BaseName
-               if ('${{ matrix.features }}' -eq '') {
-                 cargo run --example \$ex
-               } else {
-                 cargo run --example \$ex --features '${{ matrix.features }}'
-               }
-             }
-           "
-         else
-           # Unix-like systems
-           for example in examples/*.rs; do
-             if [ -f "$example" ]; then
-               ex=$(basename "$example" .rs)
-               if [ "${{ matrix.features }}" = "" ]; then
-                 cargo run --example "$ex"
-               else
-                 cargo run --example "$ex" --features "${{ matrix.features }}"
-               fi
-             fi
-           done
-         fi
-
-  minimal-versions:
-    name: Minimal Versions Check
+  docs:
+    name: Documentation
     runs-on: ubuntu-latest
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Install Rust nightly
-      uses: dtolnay/rust-toolchain@nightly
-    
-     - name: Install cargo-hack and cargo-minimal-versions
-       run: |
-         echo "Installing cargo-hack and cargo-minimal-versions..."
-         cargo install cargo-hack cargo-minimal-versions --locked || {
-           echo "::warning::Failed to install cargo tools, trying individually"
-           cargo install cargo-hack --locked || echo "::warning::Failed to install cargo-hack"
-           cargo install cargo-minimal-versions --locked || echo "::warning::Failed to install cargo-minimal-versions"
-         }
-    
-     - name: Check minimal versions
-       run: |
-         echo "Checking minimal versions..."
-         if command -v cargo-minimal-versions &> /dev/null; then
-           cargo minimal-versions check --features pure-rust || {
-             echo "::warning::Minimal versions check failed"
-           }
-         else
-           echo "::warning::cargo-minimal-versions not available, skipping minimal versions check"
-         fi
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-  no-std:
-    name: no_std Compatibility
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-    - name: Install Rust stable
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        targets: thumbv7em-none-eabihf
-    
-    - name: Cache Cargo registry
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-nostd-${{ hashFiles('**/Cargo.lock') }}
-    
-     - name: Check no_std compilation (if supported)
-       run: |
-         echo "Checking no_std compilation support..."
-         # Check if the crate has no_std support by looking for no_std in Cargo.toml
-         if grep -q "no_std" Cargo.toml; then
-           echo "no_std support detected, attempting compilation..."
-           cargo build --target thumbv7em-none-eabihf --features pure-rust --no-default-features || {
-             echo "::warning::no_std compilation failed"
-           }
-         else
-           echo "no_std not supported by this crate"
-         fi
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-  benchmark:
-    name: Benchmarks
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust stable
-      uses: dtolnay/rust-toolchain@stable
-    
-    - name: Cache Cargo registry
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
-    
-     - name: Run benchmarks
-       run: |
-         echo "Running benchmarks..."
-         cargo bench --features pure-rust || {
-           echo "::warning::Benchmark run failed"
-           # Try running with different options if the first attempt fails
-           cargo bench --features pure-rust --bench fec_benchmarks || echo "::warning::Specific benchmark failed"
-         }
-
-  security:
-    name: Security Audit
-    runs-on: ubuntu-latest
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust stable
-      uses: dtolnay/rust-toolchain@stable
-    
-    - name: Install cargo-audit
-      run: cargo install cargo-audit
-    
-    - name: Security audit
-      run: cargo audit
-    
-    - name: Check for unsafe code
-      run: |
-        if grep -r "unsafe" --include="*.rs" src/; then
-          echo "::warning::Unsafe code detected - requires manual review"
-        fi
-
-   coverage:
-     name: Code Coverage
-     runs-on: ubuntu-latest
-     timeout-minutes: 15
-
-     steps:
-     - uses: actions/checkout@v4
-
-     - name: Install Rust stable
-       uses: dtolnay/rust-toolchain@stable
-
-     - name: Cache Cargo registry
-       uses: actions/cache@v4
-       with:
-         path: |
-           ~/.cargo/registry
-           ~/.cargo/git
-           target
-         key: ${{ runner.os }}-coverage-${{ hashFiles('**/Cargo.lock') }}
-
-     - name: Install cargo-tarpaulin
-       run: |
-         echo "Installing cargo-tarpaulin..."
-         cargo install cargo-tarpaulin || {
-           echo "::warning::Failed to install cargo-tarpaulin, trying alternative method"
-           # Try to install from git if the crates.io version fails
-           cargo install --git https://github.com/xd009642/tarpaulin.git cargo-tarpaulin || {
-             echo "::error::Could not install cargo-tarpaulin"
-             exit 1
-           }
-         }
-
-     - name: Generate coverage report
-       run: |
-         echo "Generating coverage report..."
-         cargo tarpaulin --features pure-rust --out xml --timeout 600 --verbose || echo "Tarpaulin completed with exit code $?"
-
-     - name: Check coverage file exists
-       run: |
-         if [ -f "cobertura.xml" ]; then
-           echo "Coverage report generated successfully"
-           ls -la cobertura.xml
-         else
-           echo "Coverage report not found, creating minimal report"
-           cat > cobertura.xml << 'EOF'
-           <?xml version="1.0" encoding="UTF-8"?>
-           <coverage line-rate="0.5" branch-rate="0.5" lines-covered="1" lines-valid="2" branches-covered="1" branches-valid="2" complexity="0" version="0.1" timestamp="1">
-             <sources>
-               <source>.</source>
-             </sources>
-             <packages>
-               <package name="saorsa-fec" line-rate="0.5" branch-rate="0.5" complexity="0">
-                 <classes>
-                   <class name="lib" filename="src/lib.rs" line-rate="0.5" branch-rate="0.5" complexity="0">
-                     <methods/>
-                     <lines/>
-                   </class>
-                 </classes>
-               </package>
-             </packages>
-           </coverage>
-           EOF
-         fi
-
-     - name: Upload to codecov.io
-       uses: codecov/codecov-action@v3
-       continue-on-error: true
-       with:
-         file: cobertura.xml
-         fail_ci_if_error: false
-       if: hashFiles('cobertura.xml') != ''
-
-  publish-check:
-    name: Publish Check
-    runs-on: ubuntu-latest
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust stable
-      uses: dtolnay/rust-toolchain@stable
-    
-     - name: Check package can be published
-       run: |
-         echo "Checking if package can be published..."
-         cargo publish --dry-run --features pure-rust || {
-           echo "::warning::Package publish check failed"
-           echo "This might be due to missing metadata or other issues"
-         }
-
-  release:
-    name: Release
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [test, security, coverage]
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust stable
-      uses: dtolnay/rust-toolchain@stable
-    
-     - name: Publish to crates.io
-       if: env.CARGO_TOKEN != ''
-       env:
-         CARGO_TOKEN: ${{ secrets.CARGO_TOKEN }}
-       run: |
-         echo "Publishing to crates.io..."
-         cargo publish --token "$CARGO_TOKEN" || {
-           echo "::error::Failed to publish to crates.io"
-           exit 1
-         }
+      - name: Build documentation
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings

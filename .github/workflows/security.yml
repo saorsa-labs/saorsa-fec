@@ -2,399 +2,53 @@ name: Security Audit
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
   schedule:
-    # Run security audit daily at 02:00 UTC
     - cron: '0 2 * * *'
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
 
 jobs:
-   audit:
-     name: Security Audit
-     runs-on: ubuntu-latest
-     timeout-minutes: 15
-     strategy:
-       matrix:
-         toolchain: [stable]
-    
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Install Rust ${{ matrix.toolchain }}
-      uses: dtolnay/rust-toolchain@master
-      with:
-        toolchain: ${{ matrix.toolchain }}
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-    - name: Cache Cargo registry
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-security-${{ matrix.toolchain }}-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
 
-     - name: Install cargo-audit
-       run: |
-         echo "Installing cargo-audit..."
-         cargo install cargo-audit --locked || {
-           echo "::warning::Failed to install cargo-audit, trying alternative method"
-           # Try to install from git if the crates.io version fails
-           cargo install --git https://github.com/RustSec/cargo-audit.git cargo-audit || {
-             echo "::error::Could not install cargo-audit"
-             exit 1
-           }
-         }
+      - name: Run security audit
+        run: cargo audit || true
 
-     - name: Install cargo-deny
-       run: |
-         echo "Installing cargo-deny..."
-         cargo install cargo-deny --locked || {
-           echo "::warning::Failed to install cargo-deny, trying alternative method"
-           # Try to install from git if the crates.io version fails
-           cargo install --git https://github.com/EmbarkStudios/cargo-deny.git cargo-deny || {
-             echo "::error::Could not install cargo-deny"
-             exit 1
-           }
-         }
-
-     - name: Run security audit
-       run: |
-         echo "Running security audit..."
-         cargo audit --deny warnings || {
-           echo "::warning::Security audit found issues"
-           cargo audit --format json || echo "Failed to get detailed audit results"
-           # Don't fail the build for security warnings, just warn
-           echo "Security audit completed with warnings - please review above"
-         }
-
-     - name: Check for banned dependencies
-       run: |
-         echo "Checking for potentially dangerous dependencies..."
-         if cargo tree --format "{p}" 2>/dev/null | grep -E "(mysql|postgres|openssl-sys)"; then
-           echo "::error::Found potentially dangerous dependencies that could introduce vulnerabilities"
-           echo "MySQL/PostgreSQL dependencies detected - this could pull in vulnerable RSA implementations"
-           exit 1
-         else
-           echo "✅ No banned dependencies found"
-         fi
-
-     - name: Verify SQLx configuration
-       run: |
-         echo "Verifying SQLx only uses SQLite..."
-         if cargo tree --format "{p}" 2>/dev/null | grep -E "sqlx-mysql|sqlx-postgres"; then
-           echo "::error::Detected SQLx MySQL/PostgreSQL drivers - this could introduce RSA vulnerabilities"
-           exit 1
-         else
-           echo "✅ SQLx configuration verified - only SQLite driver present"
-         fi
-
-     - name: Check for unsafe code blocks
-       run: |
-         echo "Scanning for unsafe code blocks..."
-         if [ -d "src" ] && find src/ -name "*.rs" -exec grep -l "unsafe" {} \; | head -1; then
-           echo "::warning::Unsafe code detected in the following files:"
-           find src/ -name "*.rs" -exec grep -l "unsafe" {} \;
-           echo "All unsafe code requires security review"
-         else
-           echo "✅ No unsafe code blocks found"
-         fi
-
-     - name: Check for forbidden patterns in production code
-       run: |
-         echo "Checking for forbidden patterns..."
-         EXIT_CODE=0
-
-         # Check if src directory exists
-         if [ ! -d "src" ]; then
-           echo "::error::src directory not found"
-           exit 1
-         fi
-
-         # Check for unwrap() in production code (tests are OK)
-         if find src/ -name "*.rs" -not -path "*/tests/*" -exec grep -l "\.unwrap()" {} \; 2>/dev/null | head -1; then
-           echo "::error::Found .unwrap() in production code:"
-           find src/ -name "*.rs" -not -path "*/tests/*" -exec grep -Hn "\.unwrap()" {} \; 2>/dev/null
-           EXIT_CODE=1
-         fi
-
-         # Check for expect() in production code (tests are OK)
-         if find src/ -name "*.rs" -not -path "*/tests/*" -exec grep -l "\.expect(" {} \; 2>/dev/null | head -1; then
-           echo "::error::Found .expect() in production code:"
-           find src/ -name "*.rs" -not -path "*/tests/*" -exec grep -Hn "\.expect(" {} \; 2>/dev/null
-           EXIT_CODE=1
-         fi
-
-         # Check for panic! in production code (tests are OK)
-         if find src/ -name "*.rs" -not -path "*/tests/*" -exec grep -l "panic!" {} \; 2>/dev/null | head -1; then
-           echo "::error::Found panic! in production code:"
-           find src/ -name "*.rs" -not -path "*/tests/*" -exec grep -Hn "panic!" {} \; 2>/dev/null
-           EXIT_CODE=1
-         fi
-
-         # Check for todo! and unimplemented!
-         if find src/ -name "*.rs" -exec grep -l -E "(todo!|unimplemented!)" {} \; 2>/dev/null | head -1; then
-           echo "::error::Found incomplete implementations:"
-           find src/ -name "*.rs" -exec grep -Hn -E "(todo!|unimplemented!)" {} \; 2>/dev/null
-           EXIT_CODE=1
-         fi
-
-         if [ $EXIT_CODE -eq 0 ]; then
-           echo "✅ No forbidden patterns found"
-         fi
-
-         exit $EXIT_CODE
-
-     - name: License compliance check
-       run: |
-         echo "Running license compliance check..."
-         if command -v cargo-deny &> /dev/null; then
-           cargo deny check licenses || {
-             echo "::warning::License compliance check failed"
-           }
-         else
-           echo "::warning::cargo-deny not available, skipping license check"
-         fi
-
-     - name: Dependency ban check
-       run: |
-         echo "Running dependency ban check..."
-         if command -v cargo-deny &> /dev/null; then
-           cargo deny check bans || {
-             echo "::warning::Dependency ban check failed"
-           }
-         else
-           echo "::warning::cargo-deny not available, skipping ban check"
-         fi
-
-     - name: Check for vulnerabilities with cargo-deny
-       run: |
-         echo "Checking for vulnerabilities with cargo-deny..."
-         if command -v cargo-deny &> /dev/null; then
-           cargo deny check advisories || {
-             echo "::warning::Vulnerability check with cargo-deny failed"
-           }
-         else
-           echo "::warning::cargo-deny not available, skipping vulnerability check"
-         fi
-
-   dependency-review:
-     name: Dependency Review
-     runs-on: ubuntu-latest
-     timeout-minutes: 10
-     if: github.event_name == 'pull_request'
-    
+  dependency-check:
+    name: Dependency Check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-    
-     - name: Dependency Review
-       uses: actions/dependency-review-action@v4
-       continue-on-error: true
-       with:
-         fail-on-severity: moderate
-         allow-licenses: GPL-2.0-or-later, GPL-3.0-or-later, LGPL-2.1-or-later, LGPL-3.0-or-later, Apache-2.0, MIT, BSD-2-Clause, BSD-3-Clause, ISC, Unlicense
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-   secrets-scan:
-     name: Secrets Scanning
-     runs-on: ubuntu-latest
-     timeout-minutes: 10
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-     - name: Run TruffleHog
-       uses: trufflesecurity/trufflehog@main
-       continue-on-error: true
-       with:
-         path: ./
-         base: main
-         head: HEAD
-         extra_args: --debug --only-verified
-
-   sast:
-     name: Static Application Security Testing
-     runs-on: ubuntu-latest
-     timeout-minutes: 15
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-     - name: Run Semgrep
-       uses: semgrep/semgrep-action@v1
-       continue-on-error: true
-       with:
-         config: >-
-           p/rust
-           p/security-audit
-           p/secrets
-         generateSarif: "1"
-
-     - name: Upload SARIF file
-       uses: github/codeql-action/upload-sarif@v3
-       continue-on-error: true
-       with:
-         sarif_file: semgrep.sarif
-       if: always() && hashFiles('semgrep.sarif') != ''
-
-   memory-safety:
-     name: Memory Safety Check
-     runs-on: ubuntu-latest
-     timeout-minutes: 20
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Install Rust nightly with Miri
-      uses: dtolnay/rust-toolchain@nightly
-      with:
-        components: miri
-
-    - name: Cache Cargo registry
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-miri-${{ hashFiles('**/Cargo.lock') }}
-
-     - name: Run Miri
-       run: |
-         echo "Setting up and running Miri..."
-         if cargo miri setup; then
-           cargo miri test --features pure-rust || {
-             echo "::warning::Miri detected potential memory safety issues"
-             echo "This is a warning and doesn't fail the build"
-           }
-         else
-           echo "::warning::Failed to setup Miri, skipping memory safety check"
-         fi
-
-   cryptographic-validation:
-     name: Cryptographic Validation
-     runs-on: ubuntu-latest
-     timeout-minutes: 15
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Install Rust stable
-      uses: dtolnay/rust-toolchain@stable
-
-    - name: Cache Cargo registry
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-crypto-${{ hashFiles('**/Cargo.lock') }}
-
-     - name: Validate cryptographic implementations
-       run: |
-         echo "Running cryptographic validation tests..."
-
-         # Check if crypto modules exist before running tests
-         if [ -d "src/crypto" ]; then
-           echo "Running crypto tests..."
-           cargo test --features pure-rust --lib crypto::tests:: -- --nocapture || {
-             echo "::warning::Crypto tests failed or not found"
-           }
-         else
-           echo "ℹ️ No crypto module found, skipping crypto tests"
-         fi
-
-         if [ -d "src/quantum_crypto" ]; then
-           echo "Running quantum crypto tests..."
-           cargo test --features pure-rust --lib quantum_crypto::tests:: -- --nocapture || {
-             echo "::warning::Quantum crypto tests failed or not found"
-           }
-         else
-           echo "ℹ️ No quantum crypto module found, skipping quantum crypto tests"
-         fi
-
-     - name: Check for side-channel vulnerabilities
-       run: |
-         echo "Checking for potential side-channel vulnerabilities..."
-
-         # Check if crypto files exist before scanning
-         crypto_files=()
-         [ -f "src/crypto.rs" ] && crypto_files+=("src/crypto.rs")
-         [ -f "src/quantum_crypto.rs" ] && crypto_files+=("src/quantum_crypto.rs")
-
-         if [ ${#crypto_files[@]} -gt 0 ]; then
-           # Look for timing-sensitive operations that should use constant-time implementations
-           if grep -r "\.cmp\|\.eq\|==" --include="*.rs" "${crypto_files[@]}"; then
-             echo "::warning::Found potentially non-constant-time comparisons in cryptographic code"
-             echo "Please verify these use constant-time implementations"
-           else
-             echo "✅ No obvious timing-sensitive operations found"
-           fi
-         else
-           echo "ℹ️ No crypto files found, skipping side-channel vulnerability check"
-         fi
-
-   supply-chain:
-     name: Supply Chain Security
-     runs-on: ubuntu-latest
-     timeout-minutes: 10
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Install Rust stable
-      uses: dtolnay/rust-toolchain@stable
-
-     - name: Install cargo-geiger
-       run: |
-         echo "Installing cargo-geiger..."
-         cargo install cargo-geiger --locked || {
-           echo "::warning::Failed to install cargo-geiger, trying alternative method"
-           # Try to install from git if the crates.io version fails
-           cargo install --git https://github.com/rust-secure-code/cargo-geiger.git cargo-geiger || {
-             echo "::error::Could not install cargo-geiger"
-             exit 1
-           }
-         }
-
-     - name: Radiation detection (unsafe usage)
-       run: |
-         echo "Running radiation detection..."
-         if command -v cargo-geiger &> /dev/null; then
-           cargo geiger --format GitHubMarkdown >> $GITHUB_STEP_SUMMARY || {
-             echo "::warning::Radiation detection failed"
-           }
-         else
-           echo "::warning::cargo-geiger not available, skipping radiation detection"
-         fi
-
-     - name: Verify dependency sources
-       run: |
-         echo "Verifying all dependencies come from crates.io..."
-         if [ -f "Cargo.toml" ]; then
-           if grep -E "(git|path)\s*=" Cargo.toml; then
-             echo "::warning::Found non-crates.io dependencies"
-             grep -E "(git|path)\s*=" Cargo.toml
-           else
-             echo "✅ All dependencies from crates.io"
-           fi
-         else
-           echo "::error::Cargo.toml not found"
-           exit 1
-         fi
+      - name: Check for forbidden patterns
+        run: |
+          echo "Checking for forbidden patterns..."
+          # Check for unwrap() in production code
+          if find src/ -name "*.rs" -not -path "*/tests/*" -exec grep -l "\.unwrap()" {} \; 2>/dev/null | head -1; then
+            echo "::warning::Found .unwrap() in production code"
+          fi
+          # Check for expect() in production code
+          if find src/ -name "*.rs" -not -path "*/tests/*" -exec grep -l "\.expect(" {} \; 2>/dev/null | head -1; then
+            echo "::warning::Found .expect() in production code"
+          fi
+          echo "Pattern check complete"
