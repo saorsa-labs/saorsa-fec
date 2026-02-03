@@ -206,16 +206,16 @@ pub fn generate_cauchy_matrix(k: usize, m: usize) -> Vec<Vec<Gf256>> {
     // Cauchy matrix for parity rows
     // Use carefully chosen values to avoid xi + yj = 0
     for i in 0..m {
-        for j in 0..k {
+        for (j, elem) in matrix[k + i].iter_mut().take(k).enumerate() {
             // Use non-overlapping ranges to ensure xi + yj never equals 0 in GF(256)
             let xi = Gf256::new((i + 1) as u8);
             let yj = Gf256::new((j + 128) as u8); // Offset by 128 to avoid overlap
             let sum = xi + yj;
             if sum.0 == 0 {
                 // This shouldn't happen with our offset, but handle it gracefully
-                matrix[k + i][j] = Gf256::new(1);
+                *elem = Gf256::new(1);
             } else {
-                matrix[k + i][j] = Gf256::ONE / sum;
+                *elem = Gf256::ONE / sum;
             }
         }
     }

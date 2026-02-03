@@ -53,7 +53,7 @@ impl PureRustBackend {
         }
 
         // Ensure block size is even (requirement of reed-solomon-simd)
-        if block_size % 2 != 0 {
+        if !block_size.is_multiple_of(2) {
             return Err(FecError::Backend(
                 "Shard size must be even for reed-solomon-simd".to_string(),
             ));

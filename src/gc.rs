@@ -14,9 +14,10 @@ use crate::storage::{Cid, StorageBackend};
 use crate::version::VersionNode;
 
 /// Retention policy for garbage collection
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub enum RetentionPolicy {
     /// Keep all versions and chunks
+    #[default]
     KeepAll,
     /// Keep only the last N versions
     KeepLastN(usize),
@@ -38,12 +39,6 @@ impl std::fmt::Debug for RetentionPolicy {
             Self::KeepRecent(secs) => write!(f, "KeepRecent({})", secs),
             Self::Custom(_) => write!(f, "Custom(<function>)"),
         }
-    }
-}
-
-impl Default for RetentionPolicy {
-    fn default() -> Self {
-        Self::KeepAll
     }
 }
 
