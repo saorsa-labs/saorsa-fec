@@ -390,8 +390,8 @@ mod tests {
             nonce: [2u8; 12],
         };
 
-        let serialized = bincode::serialize(&metadata).unwrap();
-        let deserialized: EncryptionMetadata = bincode::deserialize(&serialized).unwrap();
+        let serialized = postcard::to_stdvec(&metadata).unwrap();
+        let deserialized: EncryptionMetadata = postcard::from_bytes(&serialized).unwrap();
 
         assert_eq!(
             deserialized.convergence_secret_id,

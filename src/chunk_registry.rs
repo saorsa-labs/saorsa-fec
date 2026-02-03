@@ -240,12 +240,12 @@ impl ChunkRegistry {
 
     /// Export registry to persistent storage
     pub fn export(&self) -> Result<Vec<u8>> {
-        bincode::serialize(&self.chunks).context("Failed to serialize chunk registry")
+        postcard::to_stdvec(&self.chunks).context("Failed to serialize chunk registry")
     }
 
     /// Import registry from persistent storage
     pub fn import(data: &[u8]) -> Result<Self> {
-        let chunks = bincode::deserialize(data).context("Failed to deserialize chunk registry")?;
+        let chunks = postcard::from_bytes(data).context("Failed to deserialize chunk registry")?;
 
         Ok(Self { chunks })
     }

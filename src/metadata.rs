@@ -80,7 +80,7 @@ impl FileMetadata {
 
         // Hash encryption metadata if present
         if let Some(enc) = &self.encryption_metadata {
-            if let Ok(serialized) = bincode::serialize(enc) {
+            if let Ok(serialized) = postcard::to_stdvec(enc) {
                 hasher.update(&serialized);
             }
         }
@@ -277,7 +277,7 @@ impl MetadataStore {
         let id = metadata.compute_id();
         let path = self.metadata_path(&id);
 
-        let data = bincode::serialize(metadata).context("Failed to serialize metadata")?;
+        let data = postcard::to_stdvec(metadata).context("Failed to serialize metadata")?;
 
         std::fs::write(path, data).context("Failed to write metadata")?;
 
@@ -290,7 +290,7 @@ impl MetadataStore {
 
         let data = std::fs::read(path).context("Failed to read metadata")?;
 
-        let metadata = bincode::deserialize(&data).context("Failed to deserialize metadata")?;
+        let metadata = postcard::from_bytes(&data).context("Failed to deserialize metadata")?;
 
         Ok(metadata)
     }

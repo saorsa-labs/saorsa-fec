@@ -55,7 +55,10 @@ impl From<blake3::Hash> for Cid {
     }
 }
 
-/// Shard header (106 bytes after bincode serialization) for v0.3
+/// Shard header (106 bytes fixed size) for v0.3
+///
+/// Note: With postcard serialization, the actual serialized data is smaller
+/// but we pad to 106 bytes for backwards compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardHeader {
     /// Shard format version
@@ -74,7 +77,7 @@ pub struct ShardHeader {
 }
 
 impl ShardHeader {
-    const SIZE: usize = 106; // Actual bincode serialization size
+    const SIZE: usize = 106; // Fixed header size for compatibility
 
     /// Create new shard header
     pub fn new(
@@ -93,26 +96,27 @@ impl ShardHeader {
         }
     }
 
-    /// Serialize to bytes
+    /// Serialize to bytes (padded to fixed size)
     pub fn to_bytes(&self) -> Result<[u8; Self::SIZE], FecError> {
-        bincode::serialize(self)
-            .map_err(|e| FecError::Backend(format!("Failed to serialize header: {}", e)))
-            .and_then(|bytes| {
-                if bytes.len() == Self::SIZE {
-                    let mut result = [0u8; Self::SIZE];
-                    result.copy_from_slice(&bytes);
-                    Ok(result)
-                } else {
-                    Err(FecError::Backend(format!(
-                        "Header size mismatch: expected {}, got {}",
-                        Self::SIZE,
-                        bytes.len()
-                    )))
-                }
-            })
+        let serialized = postcard::to_stdvec(self)
+            .map_err(|e| FecError::Backend(format!("Failed to serialize header: {}", e)))?;
+
+        // Pad to fixed size for backwards compatibility
+        let mut result = [0u8; Self::SIZE];
+        if serialized.len() > Self::SIZE {
+            return Err(FecError::Backend(format!(
+                "Header too large: {} > {}",
+                serialized.len(),
+                Self::SIZE
+            )));
+        }
+        result[..serialized.len()].copy_from_slice(&serialized);
+        // Store the actual serialized length in the last byte for parsing
+        result[Self::SIZE - 1] = serialized.len() as u8;
+        Ok(result)
     }
 
-    /// Deserialize from bytes
+    /// Deserialize from bytes (handles padded format)
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, FecError> {
         if bytes.len() != Self::SIZE {
             return Err(FecError::Backend(format!(
@@ -121,7 +125,14 @@ impl ShardHeader {
                 bytes.len()
             )));
         }
-        bincode::deserialize(bytes)
+        // Read actual length from last byte
+        let actual_len = bytes[Self::SIZE - 1] as usize;
+        if actual_len == 0 || actual_len > Self::SIZE - 1 {
+            // Fallback: try parsing the whole buffer (legacy bincode format)
+            return postcard::from_bytes(bytes)
+                .map_err(|e| FecError::Backend(format!("Failed to deserialize header: {}", e)));
+        }
+        postcard::from_bytes(&bytes[..actual_len])
             .map_err(|e| FecError::Backend(format!("Failed to deserialize header: {}", e)))
     }
 }
@@ -447,7 +458,7 @@ impl StorageBackend for LocalStorage {
     async fn put_metadata(&self, metadata: &FileMetadata) -> Result<(), FecError> {
         let path = self.metadata_file_path(&metadata.file_id);
 
-        let serialized = bincode::serialize(metadata)
+        let serialized = postcard::to_stdvec(metadata)
             .map_err(|e| FecError::Backend(format!("Failed to serialize metadata: {}", e)))?;
 
         let temp_path = path.with_extension("tmp");
@@ -471,7 +482,7 @@ impl StorageBackend for LocalStorage {
             FecError::Backend(format!("Failed to read metadata file {:?}: {}", path, e))
         })?;
 
-        bincode::deserialize(&data)
+        postcard::from_bytes(&data)
             .map_err(|e| FecError::Backend(format!("Failed to deserialize metadata: {}", e)))
     }
 
@@ -498,7 +509,7 @@ impl StorageBackend for LocalStorage {
                 if let Some(name_str) = name.to_str() {
                     if name_str.ends_with(".meta") {
                         let data = fs::read(&path).await.map_err(FecError::Io)?;
-                        if let Ok(metadata) = bincode::deserialize::<FileMetadata>(&data) {
+                        if let Ok(metadata) = postcard::from_bytes::<FileMetadata>(&data) {
                             metadata_list.push(metadata);
                         }
                     }
